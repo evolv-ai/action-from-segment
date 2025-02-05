@@ -44,7 +44,7 @@ export interface Payload {
    */
   app_version?: string
   /**
-   * Platform of the device.
+   * Platform of the device. If using analytics.js to send events from a Browser and no if no Platform value is provided, the value "Web" will be sent.
    */
   platform?: string
   /**
@@ -178,7 +178,7 @@ export interface Payload {
     [k: string]: unknown
   }[]
   /**
-   * The following fields will be set only once per session when using AJS2 as the source.
+   * The following fields will only be set as user properties if they do not already have a value.
    */
   setOnce?: {
     /**
@@ -193,7 +193,7 @@ export interface Payload {
     [k: string]: unknown
   }
   /**
-   * The following fields will be set every session when using AJS2 as the source.
+   * The following fields will be set as user properties for every event.
    */
   setAlways?: {
     referrer?: string

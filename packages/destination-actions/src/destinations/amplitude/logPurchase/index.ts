@@ -85,7 +85,22 @@ const action: ActionDefinition<Settings, Payload> = {
           label: 'Revenue',
           type: 'number',
           description:
-            'Revenue = price * quantity. If you send all 3 fields of price, quantity, and revenue, then (price * quantity) will be used as the revenue value. You can use negative values to indicate refunds.'
+            'Revenue = price * quantity. If you send all 3 fields of price, quantity, and revenue, then (price * quantity) will be used as the revenue value. You can use negative values to indicate refunds.',
+          depends_on: {
+            match: 'any',
+            conditions: [
+              {
+                fieldKey: 'price',
+                operator: 'is',
+                value: ''
+              },
+              {
+                fieldKey: 'quantity',
+                operator: 'is',
+                value: ''
+              }
+            ]
+          }
         },
         productId: {
           label: 'Product ID',
@@ -220,8 +235,8 @@ const action: ActionDefinition<Settings, Payload> = {
       properties.platform = properties.platform.replace(/ios/i, 'iOS').replace(/android/i, 'Android')
     }
 
-    if (library) {
-      if (library === 'analytics.js') properties.platform = 'Web'
+    if (library === 'analytics.js' && !properties.platform) {
+      properties.platform = 'Web'
     }
 
     if (time && dayjs.utc(time).isValid()) {
