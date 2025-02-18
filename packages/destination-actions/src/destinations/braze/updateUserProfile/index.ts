@@ -38,7 +38,11 @@ const action: ActionDefinition<Settings, Payload> = {
       type: 'string',
       allowNull: true,
       default: {
-        '@path': '$.properties.braze_id'
+        '@if': {
+          exists: { '@path': '$.integrations.Braze Cloud Mode (Actions).braze_id' },
+          then: { '@path': '$.integrations.Braze Cloud Mode (Actions).braze_id' },
+          else: { '@path': '$.traits.braze_id' }
+        }
       }
     },
     country: {
@@ -287,6 +291,13 @@ const action: ActionDefinition<Settings, Payload> = {
       description:
         'If true, Segment will batch events before sending to Braze’s user track endpoint. Braze accepts batches of up to 75 events.',
       default: true
+    },
+    batch_size: {
+      label: 'Batch Size',
+      description: 'Maximum number of events to include in each batch. Actual batch sizes may be lower.',
+      type: 'number',
+      default: 75,
+      unsafe_hidden: true
     }
   },
 
