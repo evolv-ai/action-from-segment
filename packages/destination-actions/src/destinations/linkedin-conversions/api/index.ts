@@ -1,4 +1,11 @@
-import { RequestClient, ModifiedResponse, DynamicFieldResponse, ActionHookResponse } from '@segment/actions-core'
+import {
+  RequestClient,
+  ModifiedResponse,
+  DynamicFieldResponse,
+  ActionHookResponse,
+  PayloadValidationError,
+  Features
+} from '@segment/actions-core'
 import { BASE_URL, DEFAULT_POST_CLICK_LOOKBACK_WINDOW, DEFAULT_VIEW_THROUGH_LOOKBACK_WINDOW } from '../constants'
 import type {
   ProfileAPIResponse,
@@ -12,8 +19,8 @@ import type {
   GetConversionRuleResponse,
   ConversionRuleUpdateResponse
 } from '../types'
-import type { Payload, HookBundle } from '../streamConversion/generated-types'
-import { createHash } from 'crypto'
+import type { Payload, OnMappingSaveInputs, OnMappingSaveOutputs } from '../streamConversion/generated-types'
+import { processHashing } from '../../../lib/hashing-utils'
 
 interface ConversionRuleUpdateValues {
   name?: string
@@ -26,6 +33,35 @@ interface ConversionRuleUpdateValues {
 interface UserID {
   idType: 'SHA256_EMAIL' | 'LINKEDIN_FIRST_PARTY_ADS_TRACKING_UUID' | 'AXCIOM_ID' | 'ORACLE_MOAT_ID'
   idValue: string
+}
+
+function validate(payload: Payload, conversionTime: number) {
+  // Check if the timestamp is within the past 90 days
+  const ninetyDaysAgo = Date.now() - 90 * 24 * 60 * 60 * 1000
+  if (conversionTime < ninetyDaysAgo) {
+    throw new PayloadValidationError('Timestamp should be within the past 90 days.')
+  }
+
+  if (!payload.email && !payload.linkedInUUID && !payload.acxiomID && !payload.oracleID) {
+    throw new PayloadValidationError('One of email or LinkedIn UUID or Axciom ID or Oracle ID is required.')
+  }
+}
+
+function isNotEpochTimestampInMilliseconds(timestamp: string) {
+  if (typeof timestamp === 'string' && !isNaN(Number(timestamp))) {
+    const convertedTimestamp = Number(timestamp)
+    const startDate = new Date('1970-01-01T00:00:00Z').getTime()
+    const endDate = new Date('2100-01-01T00:00:00Z').getTime()
+    if (Number.isSafeInteger(convertedTimestamp) && convertedTimestamp >= startDate && convertedTimestamp <= endDate) {
+      return false
+    }
+  }
+  return true
+}
+
+function convertToEpochMillis(timestamp: string) {
+  const date = new Date(timestamp)
+  return date.getTime()
 }
 
 export class LinkedInConversions {
@@ -49,7 +85,7 @@ export class LinkedInConversions {
   getConversionRule = async (
     adAccount: string,
     conversionRuleId: string
-  ): Promise<ActionHookResponse<HookBundle['onMappingSave']['outputs']>> => {
+  ): Promise<ActionHookResponse<OnMappingSaveOutputs>> => {
     try {
       const { data } = await this.request<GetConversionRuleResponse>(`${BASE_URL}/conversions/${conversionRuleId}`, {
         method: 'get',
@@ -81,8 +117,8 @@ export class LinkedInConversions {
   }
 
   createConversionRule = async (
-    hookInputs: HookBundle['onMappingSave']['inputs']
-  ): Promise<ActionHookResponse<HookBundle['onMappingSave']['outputs']>> => {
+    hookInputs: OnMappingSaveInputs | undefined
+  ): Promise<ActionHookResponse<OnMappingSaveOutputs>> => {
     if (!hookInputs?.adAccountId) {
       return {
         error: {
@@ -134,9 +170,9 @@ export class LinkedInConversions {
   }
 
   updateConversionRule = async (
-    hookInputs: HookBundle['onMappingSave']['inputs'],
-    hookOutputs: HookBundle['onMappingSave']['outputs']
-  ): Promise<ActionHookResponse<HookBundle['onMappingSave']['outputs']>> => {
+    hookInputs: OnMappingSaveInputs | undefined,
+    hookOutputs: OnMappingSaveOutputs
+  ): Promise<ActionHookResponse<OnMappingSaveOutputs>> => {
     if (!hookOutputs) {
       return {
         error: {
@@ -376,17 +412,22 @@ export class LinkedInConversions {
     }
   }
 
-  private hashValue = (val: string): string => {
-    const hash = createHash('sha256')
-    hash.update(val)
-    return hash.digest('hex')
+  private normalizeEmail = (email: string): string => {
+    return email.toLowerCase()
   }
 
-  private buildUserIdsArray = (payload: Payload): UserID[] => {
+  private buildUserIdsArray = (payload: Payload, features?: Features): UserID[] => {
     const userIds: UserID[] = []
 
     if (payload.email) {
-      const hashedEmail = this.hashValue(payload.email)
+      const hashedEmail = processHashing(
+        payload.email,
+        'sha256',
+        'hex',
+        features ?? {},
+        'actions-linkedin-conversions',
+        this.normalizeEmail
+      )
       userIds.push({
         idType: 'SHA256_EMAIL',
         idValue: hashedEmail
@@ -417,8 +458,12 @@ export class LinkedInConversions {
     return userIds
   }
 
-  async streamConversionEvent(payload: Payload, conversionTime: number): Promise<ModifiedResponse> {
-    const userIds = this.buildUserIdsArray(payload)
+  async streamConversionEvent(
+    payload: Payload,
+    conversionTime: number,
+    features?: Features
+  ): Promise<ModifiedResponse> {
+    const userIds = this.buildUserIdsArray(payload, features)
     return this.request(`${BASE_URL}/conversionEvents`, {
       method: 'POST',
       json: {
@@ -430,6 +475,37 @@ export class LinkedInConversions {
           userIds,
           userInfo: payload.userInfo
         }
+      }
+    })
+  }
+
+  async batchConversionAdd(payloads: Payload[], features?: Features): Promise<ModifiedResponse> {
+    return this.request(`${BASE_URL}/conversionEvents`, {
+      method: 'post',
+      headers: {
+        'X-RestLi-Method': 'BATCH_CREATE'
+      },
+      json: {
+        elements: [
+          ...payloads.map((payload) => {
+            const conversionTime = isNotEpochTimestampInMilliseconds(payload.conversionHappenedAt)
+              ? convertToEpochMillis(payload.conversionHappenedAt)
+              : Number(payload.conversionHappenedAt)
+            validate(payload, conversionTime)
+
+            const userIds = this.buildUserIdsArray(payload, features)
+            return {
+              conversion: `urn:lla:llaPartnerConversion:${this.conversionRuleId}`,
+              conversionHappenedAt: conversionTime,
+              conversionValue: payload.conversionValue,
+              eventId: payload.eventId,
+              user: {
+                userIds,
+                userInfo: payload.userInfo
+              }
+            }
+          })
+        ]
       }
     })
   }
@@ -506,8 +582,8 @@ export class LinkedInConversions {
   }
 
   private conversionRuleValuesUpdated = (
-    hookInputs: HookBundle['onMappingSave']['inputs'],
-    hookOutputs: Partial<HookBundle['onMappingSave']['outputs']>
+    hookInputs: OnMappingSaveInputs,
+    hookOutputs: Partial<OnMappingSaveOutputs>
   ): ConversionRuleUpdateValues => {
     const valuesChanged: ConversionRuleUpdateValues = {}
 
